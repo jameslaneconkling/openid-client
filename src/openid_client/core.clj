@@ -22,6 +22,12 @@
    :success-uri      (env :success-uri)
    :error-uri        (env :error-uri)})
 
+(defn validate-env
+  [env-key]
+  (if (nil? (env-key env))
+    (throw (Exception. (str "Required environment variable '" env-key "' missing")))))
+
+(run! validate-env [:client-id :client-secret :private-key :private-key-passphrase :success-uri :error-uri])
 
 (def private-key (keys/private-key (env :private-key)
                                    (env :private-key-passphrase)))
