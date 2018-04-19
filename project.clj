@@ -11,6 +11,7 @@
                  [buddy/buddy-core "1.4.0"]
                  [buddy/buddy-sign "2.2.0"]
                  [environ "1.1.0"]]
+  :profiles {:uberjar {:uberjar-exclusions [#"org/bouncycastle"]}}
   :ring {:handler openid-client.core/app}
   :plugins [[lein-ring "0.9.7"]
             [lein-environ "0.4.0"]]

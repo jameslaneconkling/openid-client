@@ -3,5 +3,4 @@
                     :private-key "PRIVATE_KEY.pem"
                     :private-key-passphrase "PRIVATE_KEY_PASSPHRASE"
                     :success-uri "/auth/success" 
-                    :error-uri "/auth/error"}}
- :uberjar {:uberjar-exclusions [#"org/bouncycastle"]}}
+                    :error-uri "/auth/error"}}}
