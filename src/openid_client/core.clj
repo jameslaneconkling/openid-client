@@ -9,7 +9,8 @@
             [buddy.sign.jwt :as jwt]
             [clojure.string :as str]
             [environ.core :refer [env]])
-  (:import [java.time Instant]))
+  (:import [java.util UUID]
+           [java.time Instant]))
 
 (def config
   {:authorize-uri    "https://accounts.google.com/o/oauth2/v2/auth"
@@ -27,10 +28,12 @@
   (if (nil? (env-key env))
     (throw (Exception. (str "Required environment variable '" env-key "' missing")))))
 
-(run! validate-env [:client-id :client-secret :private-key :private-key-passphrase :success-uri :error-uri])
+(run! validate-env
+      [:client-id :client-secret :private-key :private-key-passphrase :public-key :success-uri :error-uri])
 
 (def private-key (keys/private-key (env :private-key)
                                    (env :private-key-passphrase)))
+(def public-key (keys/public-key (env :public-key)))
 
 (defn redirect-uri
   [request]
@@ -47,7 +50,18 @@
                            :client_id     (:client-id config)
                            :redirect_uri  (redirect-uri request)
                            :prompt        "consent"
+                           :state         (jwt/sign
+                                           {:openid_user (get-in request [:cookies "openid_user" :value])
+                                            :success_uri (get-in request [:params :success_uri])}
+                                           private-key
+                                           {:alg :rs256})
                            :scope         (str/join " " (:scopes config))})))
+
+(defn success-uri
+  [oauth-state user-id]
+  (str (or (:success_uri oauth-state) (:success-uri config))
+       "#"
+       (codec/form-encode {:token (sign-jwt user-id)})))
 
 (defn request-access-token
   [request]
@@ -76,10 +90,16 @@
   (if (not= id "113766572582938032472")
     (throw (Exception. "400"))))
 
+(defn verify-state
+  [openid_user oauth-state]
+  "Verify oauth-state param matches user id from cookie assigned when user started signin at /auth"
+  (if (not= openid_user (:openid_user oauth-state))
+    (throw (Exception. "400"))))
+
 (defn sign-jwt
   [id]
   (jwt/sign {:id id
-             :exp (+ (.getEpochSecond (Instant/now)) (* 60 60 6))} ;; 6 hours
+             :exp (+ (.getEpochSecond (Instant/now)) 21600)} ;; 6 hours
             private-key
             {:alg :rs256}))
 
@@ -97,44 +117,49 @@
             (resp/content-type "text/plain"))))))
 
 
+(defn create-user-id-cookie
+  []
+  {"openid_user" {:value (UUID/randomUUID)
+                  :http-only true
+                  ;; :secure true
+                  :max-age 60 ;; 1 min
+                  }})
+
 (def handler (create-handler
-              [:get "/auth" (fn [_] (-> "/auth/index.html"
-                                        (resp/resource-response {:root "public"})
-                                        (resp/content-type "text/html")))]
-              [:get "/auth/error" (fn [_] (-> "/auth/error/index.html"
-                                              (resp/resource-response  {:root "public"})
-                                              (resp/content-type  "text/html")))]
-              [:get "/auth/success" (fn [_] (-> "/auth/success/index.html"
-                                                (resp/resource-response  {:root "public"})
-                                                (resp/content-type  "text/html")))]
-              [:get "/auth/google" (fn [request] (resp/redirect (authorize-uri request)))]
-              [:get "/auth/google/callback" (fn [request] (try (let [access-token (request-access-token request)
-                                                                     {:keys [id]} (request-user-info access-token)]
-                                                                 (verify-user id)
-                                                                 (resp/redirect (str (:success-uri config)
-                                                                                     "?"
-                                                                                     (codec/form-encode {:token (sign-jwt id)}))))
-                                                               (catch Exception _ (resp/redirect (:error-uri config)))))]))
+              [:get "/auth"
+               (fn [_]
+                 (-> "/auth/index.html"
+                     (resp/resource-response {:root "public"})
+                     (resp/content-type "text/html")
+                     (assoc :cookies (create-user-id-cookie))))]
+              [:get "/auth/error"
+               (fn [request]
+                 (-> "/auth/error/index.html"
+                     (resp/resource-response  {:root "public"})
+                     (resp/content-type  "text/html")))]
+              [:get "/auth/success"
+               (fn [{:keys [cookies]}]
+                 (-> "/auth/success/index.html"
+                     (resp/resource-response  {:root "public"})
+                     (resp/content-type  "text/html")))]
+              [:get "/auth/google"
+               (fn [request]
+                 (resp/redirect (authorize-uri request)))]
+              [:get "/auth/google/callback"
+               (fn [request]
+                 (try (let [openid_user (get-in request [:cookies "openid_user" :value])
+                            oauth-state (-> request
+                                            (get-in [:params :state])
+                                            (jwt/unsign public-key {:alg :rs256}))]
+                        (verify-state openid_user oauth-state)
+                        (let [access-token (request-access-token request)
+                              {:keys [id]} (request-user-info access-token)]
+                          (verify-user id)
+                          (resp/redirect (success-uri oauth-state id))))
+                      (catch Exception _ (resp/redirect (:error-uri config)))))]))
 
 (def app
   (-> handler
       (wrap-defaults (-> site-defaults
-                         (assoc :cookies false)
-                         (assoc-in [:security :anti-forgery] false) ;; TODO - enable for select routes?
-                         (assoc :session false))) ;; TODO - add secure-site-defaults
+                         (assoc :session false)))
       wrap-with-logger))
-
-;; (def request {:ssl-client-cert nil
-;;               :remote-addr "0:0:0:0:0:0:0:1"
-;;               :headers {"host" "localhost:3000"
-;;                         "accept" "text/html"}
-;;               :server-port 3000
-;;               :content-length nil
-;;               :content-type nil
-;;               :character-encoding nil
-;;               :uri "/auth"
-;;               ;; :uri "/auth/google/callback"
-;;               :server-name "localhost"
-;;               :query-string "redirect=http%3A%2F%2Fcanvas.com&token=that"
-;;               :scheme :http
-;;               :request-method :get})
