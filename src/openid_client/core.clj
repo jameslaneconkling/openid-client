@@ -52,7 +52,8 @@
    :redirect-uri          "/auth/google/callback"
    :error-uri             (env :error-uri)
    :default-success-uri   (env :default-success-uri)
-   :valid-success-origins (->> (str/split (env :valid-success-origins) #" ")
+   :valid-success-origins (->> (str/split (env :valid-success-origins "") #" ")
+                               (filter #(not= "" %))
                                (map get-origin)
                                (into #{}))})
 
