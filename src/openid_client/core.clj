@@ -1,5 +1,12 @@
 (ns openid-client.core
-  (:require [ring.util.request :as req]
+  (:require [openid-client.handler :refer [create-handler]]
+            [openid-client.utils :refer [get-origin
+                                         validate-success-uri
+                                         verify-user
+                                         verify-state
+                                         create-user-id-cookie
+                                         success-uri]]
+            [ring.util.request :as req]
             [ring.util.response :as resp]
             [ring.util.codec :as codec]
             [ring.middleware.defaults :refer [wrap-defaults site-defaults]]
@@ -9,9 +16,7 @@
             [buddy.sign.jwt :as jwt]
             [clojure.string :as str]
             [environ.core :refer [env]])
-  (:import [java.net URI]
-           [java.util UUID]
-           [java.time Instant]))
+  (:import [java.net URI]))
 
 (defn validate-env
   [env-key]
@@ -29,18 +34,6 @@
 
 (if (env :valid-success-origins)
   (run! validate-success-origins (str/split (env :valid-success-origins) #" ")))
-
-(defn get-origin
-  [uri-string]
-  (let [uri (URI. uri-string)]
-    (str
-     (.getScheme uri)
-     "://"
-     (.getHost uri)
-     (let [port (.getPort uri)]
-       (if (= port -1)
-         ""
-         (str ":" port))))))
 
 (def config
   {:authorize-uri         "https://accounts.google.com/o/oauth2/v2/auth"
@@ -62,43 +55,17 @@
                                    (env :private-key-passphrase)))
 (def public-key (keys/public-key (env :public-key)))
 
-(defn sign-jwt
-  [id]
-  (jwt/sign {:id id
-             :exp (+ (.getEpochSecond (Instant/now)) 21600)} ;; 6 hours
-            private-key
-            {:alg :rs256}))
-
-(defn validate-success-uri
-  [uri]
-  (if-not (or (nil? uri)
-              (contains? (:valid-success-origins config) (get-origin uri)))
-    (throw (Exception. "400"))))
-
-(defn verify-user
-  [id]
-  "Verify user with id exists in the system and optionally retrieve user info"
-  (Thread/sleep 500)
-  (if (not= id "113766572582938032472")
-    (throw (Exception. "400"))))
-
-(defn verify-state
-  [openid_user oauth-state]
-  "Verify oauth-state param matches user id from cookie assigned when user started signin at /auth"
-  (if (not= openid_user (:openid_user oauth-state))
-    (throw (Exception. "400"))))
-
 (defn redirect-uri
   [request]
   (-> (req/request-url request)
-      (java.net.URI/create)
+      (URI/create)
       (.resolve (:redirect-uri config))
       str))
 
 (defn authorize-uri
   [request]
   (let [success-uri (get-in request [:params :success_uri])]
-    (validate-success-uri success-uri)
+    (validate-success-uri success-uri (:valid-success-origins config))
     (str (:authorize-uri config)
          (if (.contains ^String (:authorize-uri config) "?") "&" "?")
          (codec/form-encode {:response_type "code"
@@ -111,12 +78,6 @@
                                              private-key
                                              {:alg :rs256})
                              :scope         (str/join " " (:scopes config))}))))
-
-(defn success-uri
-  [oauth-state user-id]
-  (str (or (:success_uri oauth-state) (:default-success-uri config))
-       "#"
-       (codec/form-encode {:token (sign-jwt user-id)})))
 
 (defn request-access-token
   [request]
@@ -131,6 +92,7 @@
       :body
       :access_token))
 
+;; TODO - might be possible to get this along w/ the access-token, requiring one less request
 (defn request-user-info 
   [access-token]
   (-> (client/get (:user-info-uri config)
@@ -138,31 +100,8 @@
                    :as :json})
       :body))
 
-(defn create-handler
-  [& handlers]
-  (let [handler-map (reduce
-                     (fn [handler-map [method uri handler]]
-                       (assoc-in handler-map [uri method] handler))
-                     {}
-                     handlers)]
-    (fn [{:keys [uri request-method] :as request}]
-      (if (get-in handler-map [uri request-method])
-        (try
-          ((get-in handler-map [uri request-method]) request)
-          (catch Exception _ (resp/redirect (:error-uri config))))
-        (-> (resp/not-found "NOT FOUND")
-            (resp/content-type "text/plain"))))))
-
-
-(defn create-user-id-cookie
-  []
-  {"openid_user" {:value (UUID/randomUUID)
-                  :http-only true
-                  ;; :secure true
-                  :max-age 60 ;; 1 min
-                  }})
-
 (def handler (create-handler
+              config
               [:get "/auth"
                (fn [_]
                  (-> "/auth/index.html"
@@ -195,7 +134,8 @@
                      (let [access-token (request-access-token request)
                            {:keys [id]} (request-user-info access-token)]
                        (verify-user id)
-                       (resp/redirect (success-uri oauth-state id))))
+                       (resp/redirect
+                        (success-uri oauth-state id (:default-success-uri config) private-key))))
                    (catch Exception _ (resp/redirect (:error-uri config)))))]))
 
 (def app
