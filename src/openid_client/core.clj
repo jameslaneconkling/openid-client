@@ -9,31 +9,83 @@
             [buddy.sign.jwt :as jwt]
             [clojure.string :as str]
             [environ.core :refer [env]])
-  (:import [java.util UUID]
+  (:import [java.net URI]
+           [java.util UUID]
            [java.time Instant]))
-
-(def config
-  {:authorize-uri    "https://accounts.google.com/o/oauth2/v2/auth"
-   :access-token-uri "https://www.googleapis.com/oauth2/v4/token"
-   :user-info-uri    "https://www.googleapis.com/userinfo/v2/me" 
-   :client-id        (env :client-id)
-   :client-secret    (env :client-secret)
-   :scopes           ["openid"] ;; profile email
-   :redirect-uri     "/auth/google/callback"
-   :success-uri      (env :success-uri)
-   :error-uri        (env :error-uri)})
 
 (defn validate-env
   [env-key]
-  (if (nil? (env-key env))
+  (if-not (env-key env)
     (throw (Exception. (str "Required environment variable '" env-key "' missing")))))
 
+(defn validate-success-origins
+  [origin]
+  (if-not (re-matches #"https?:\/\/.*" origin)
+    (throw (Exception. (str "Expected valid-success-origins to be a space-separated array of valid url origins.  Received invalid origin " origin)))))
+
 (run! validate-env
-      [:client-id :client-secret :private-key :private-key-passphrase :public-key :success-uri :error-uri])
+      [:client-id :client-secret :private-key :private-key-passphrase
+       :public-key :error-uri :default-success-uri])
+
+(if (env :valid-success-origins)
+  (run! validate-success-origins (str/split (env :valid-success-origins) #" ")))
+
+(defn get-origin
+  [uri-string]
+  (let [uri (URI. uri-string)]
+    (str
+     (.getScheme uri)
+     "://"
+     (.getHost uri)
+     (let [port (.getPort uri)]
+       (if (= port -1)
+         ""
+         (str ":" port))))))
+
+(def config
+  {:authorize-uri         "https://accounts.google.com/o/oauth2/v2/auth"
+   :access-token-uri      "https://www.googleapis.com/oauth2/v4/token"
+   :user-info-uri         "https://www.googleapis.com/userinfo/v2/me" 
+   :client-id             (env :client-id)
+   :client-secret         (env :client-secret)
+   :scopes                ["openid"] ;; profile email
+   :redirect-uri          "/auth/google/callback"
+   :error-uri             (env :error-uri)
+   :default-success-uri   (env :default-success-uri)
+   :valid-success-origins (->> (str/split (env :valid-success-origins) #" ")
+                               (map get-origin)
+                               (into #{}))})
+
 
 (def private-key (keys/private-key (env :private-key)
                                    (env :private-key-passphrase)))
 (def public-key (keys/public-key (env :public-key)))
+
+(defn sign-jwt
+  [id]
+  (jwt/sign {:id id
+             :exp (+ (.getEpochSecond (Instant/now)) 21600)} ;; 6 hours
+            private-key
+            {:alg :rs256}))
+
+(defn validate-success-uri
+  [uri]
+  (if-not (or (nil? uri)
+              (contains? (:valid-success-origins config) (get-origin uri)))
+    (throw (Exception. "400"))))
+
+(defn verify-user
+  [id]
+  "Verify user with id exists in the system and optionally retrieve user info"
+  (Thread/sleep 500)
+  (if (not= id "113766572582938032472")
+    (throw (Exception. "400"))))
+
+(defn verify-state
+  [openid_user oauth-state]
+  "Verify oauth-state param matches user id from cookie assigned when user started signin at /auth"
+  (if (not= openid_user (:openid_user oauth-state))
+    (throw (Exception. "400"))))
 
 (defn redirect-uri
   [request]
@@ -44,22 +96,24 @@
 
 (defn authorize-uri
   [request]
-  (str (:authorize-uri config)
-       (if (.contains ^String (:authorize-uri config) "?") "&" "?")
-       (codec/form-encode {:response_type "code"
-                           :client_id     (:client-id config)
-                           :redirect_uri  (redirect-uri request)
-                           :prompt        "consent"
-                           :state         (jwt/sign
-                                           {:openid_user (get-in request [:cookies "openid_user" :value])
-                                            :success_uri (get-in request [:params :success_uri])}
-                                           private-key
-                                           {:alg :rs256})
-                           :scope         (str/join " " (:scopes config))})))
+  (let [success-uri (get-in request [:params :success_uri])]
+    (validate-success-uri success-uri)
+    (str (:authorize-uri config)
+         (if (.contains ^String (:authorize-uri config) "?") "&" "?")
+         (codec/form-encode {:response_type "code"
+                             :client_id     (:client-id config)
+                             :redirect_uri  (redirect-uri request)
+                             :prompt        "consent"
+                             :state         (jwt/sign
+                                             {:openid_user (get-in request [:cookies "openid_user" :value])
+                                              :success_uri success-uri}
+                                             private-key
+                                             {:alg :rs256})
+                             :scope         (str/join " " (:scopes config))}))))
 
 (defn success-uri
   [oauth-state user-id]
-  (str (or (:success_uri oauth-state) (:success-uri config))
+  (str (or (:success_uri oauth-state) (:default-success-uri config))
        "#"
        (codec/form-encode {:token (sign-jwt user-id)})))
 
@@ -82,26 +136,6 @@
                   {:oauth-token access-token,
                    :as :json})
       :body))
-
-(defn verify-user
-  [id]
-  "Verify user with id exists in the system and optionally retrieve user info"
-  (Thread/sleep 500)
-  (if (not= id "113766572582938032472")
-    (throw (Exception. "400"))))
-
-(defn verify-state
-  [openid_user oauth-state]
-  "Verify oauth-state param matches user id from cookie assigned when user started signin at /auth"
-  (if (not= openid_user (:openid_user oauth-state))
-    (throw (Exception. "400"))))
-
-(defn sign-jwt
-  [id]
-  (jwt/sign {:id id
-             :exp (+ (.getEpochSecond (Instant/now)) 21600)} ;; 6 hours
-            private-key
-            {:alg :rs256}))
 
 (defn create-handler
   [& handlers]
@@ -144,7 +178,9 @@
                      (resp/content-type  "text/html")))]
               [:get "/auth/google"
                (fn [request]
-                 (resp/redirect (authorize-uri request)))]
+                 (try
+                   (resp/redirect (authorize-uri request))
+                   (catch Exception _ (resp/redirect (:error-uri config)))))]
               [:get "/auth/google/callback"
                (fn [request]
                  (try (let [openid_user (get-in request [:cookies "openid_user" :value])

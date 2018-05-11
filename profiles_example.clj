@@ -3,5 +3,6 @@
                     :private-key "PRIVATE_KEY.pem"
                     :private-key-passphrase "PRIVATE_KEY_PASSPHRASE"
                     :public-key "PUBLIC_KEY.pem"
-                    :success-uri "/auth/success" 
-                    :error-uri "/auth/error"}}}
+                    :error-uri "/auth/error"
+                    :default-success-uri "/auth/success" 
+                    :valid-success-origins "https://external-domain.com https://another-domain.org"}}}
