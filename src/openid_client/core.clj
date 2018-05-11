@@ -146,7 +146,9 @@
                      handlers)]
     (fn [{:keys [uri request-method] :as request}]
       (if (get-in handler-map [uri request-method])
-        ((get-in handler-map [uri request-method]) request)
+        (try
+          ((get-in handler-map [uri request-method]) request)
+          (catch Exception _ (resp/redirect (:error-uri config))))
         (-> (resp/not-found "NOT FOUND")
             (resp/content-type "text/plain"))))))
 
@@ -183,16 +185,17 @@
                    (catch Exception _ (resp/redirect (:error-uri config)))))]
               [:get "/auth/google/callback"
                (fn [request]
-                 (try (let [openid_user (get-in request [:cookies "openid_user" :value])
-                            oauth-state (-> request
-                                            (get-in [:params :state])
-                                            (jwt/unsign public-key {:alg :rs256}))]
-                        (verify-state openid_user oauth-state)
-                        (let [access-token (request-access-token request)
-                              {:keys [id]} (request-user-info access-token)]
-                          (verify-user id)
-                          (resp/redirect (success-uri oauth-state id))))
-                      (catch Exception _ (resp/redirect (:error-uri config)))))]))
+                 (try
+                   (let [openid_user (get-in request [:cookies "openid_user" :value])
+                         oauth-state (-> request
+                                         (get-in [:params :state])
+                                         (jwt/unsign public-key {:alg :rs256}))]
+                     (verify-state openid_user oauth-state)
+                     (let [access-token (request-access-token request)
+                           {:keys [id]} (request-user-info access-token)]
+                       (verify-user id)
+                       (resp/redirect (success-uri oauth-state id))))
+                   (catch Exception _ (resp/redirect (:error-uri config)))))]))
 
 (def app
   (-> handler
